@@ -1,0 +1,23 @@
+[project]
+name = "llmproxy"
+version = "0.1.0"
+description = "Python client library for the LLMProxy server"
+readme = "README.md"
+authors = [
+    { name = "Abdullah Bin Faisal" }
+]
+requires-python = ">=3.8"
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "flask",
+    "openai",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["llmproxy*"]

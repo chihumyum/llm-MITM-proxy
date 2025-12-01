@@ -1,0 +1,13 @@
+FROM gcc:latest
+
+WORKDIR /app
+
+EXPOSE 9400
+
+COPY c_client/ ./
+
+RUN apt-get update && apt-get install -y libssl-dev libnsl-dev netcat-openbsd
+
+RUN make
+
+CMD ["./proxy", "9400", "proxy_ca.crt", "proxy_ca.key"]

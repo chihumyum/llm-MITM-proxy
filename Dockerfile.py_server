@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+EXPOSE 5000
+EXPOSE 5001
+
+COPY py_server/ ./
+
+RUN pip install requests python-dotenv flask openai brotli
+
+RUN apt-get update && apt-get install -y procps netcat-openbsd
+
+# Use TCP filter server instead of Flask app
+CMD ["python3", "tcp_filter_server.py"]
