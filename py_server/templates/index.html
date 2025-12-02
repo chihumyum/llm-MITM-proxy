@@ -11,66 +11,102 @@
             padding: 0;
         }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f5f5f5;
+            color: #111;
             min-height: 100vh;
             display: flex;
-            justify-content: center;
             align-items: center;
-            padding: 20px;
+            justify-content: center;
+            padding: 40px 18px;
+            line-height: 1.5;
         }
-        .container {
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            padding: 40px;
-            max-width: 500px;
+        .shell {
             width: 100%;
+            max-width: 960px;
+            background: #fff;
+            border: 1px solid #dcdcdc;
+            border-radius: 14px;
+            box-shadow: 0 16px 60px rgba(0, 0, 0, 0.06);
+            padding: 32px;
         }
         h1 {
-            color: #333;
-            margin-bottom: 8px;
             font-size: 28px;
+            margin-bottom: 6px;
+            font-weight: 700;
         }
-        .subtitle {
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 14px;
-        }
-        .form-group {
-            margin-bottom: 24px;
-        }
-        label {
-            display: block;
+        .lede {
             color: #555;
-            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1.1fr 0.9fr;
+            gap: 16px;
+        }
+        .panel {
+            border: 1px solid #e6e6e6;
+            border-radius: 12px;
+            padding: 20px;
+            background: #fafafa;
+        }
+        .panel h2 {
+            font-size: 18px;
             margin-bottom: 8px;
+        }
+        .muted {
+            color: #666;
             font-size: 14px;
+            margin-bottom: 16px;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .label {
+            font-weight: 600;
+            font-size: 13px;
+            color: #222;
         }
         input[type="text"] {
             width: 100%;
-            padding: 12px 16px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            font-size: 16px;
-            transition: border-color 0.3s, box-shadow 0.3s;
+            padding: 12px 12px;
+            border-radius: 10px;
+            border: 1px solid #ccc;
+            background: #fff;
+            font-size: 14px;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }
         input[type="text"]:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+            border-color: #111;
+            box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.08);
         }
-        .checkbox-group {
+        .hint {
+            font-size: 12px;
+            color: #888;
+        }
+        .toggle-row {
             display: flex;
             align-items: center;
-            gap: 12px;
+            justify-content: space-between;
+            padding: 12px;
+            border: 1px dashed #d0d0d0;
+            border-radius: 10px;
+            background: #fff;
         }
-        .toggle {
+        .switch {
             position: relative;
-            width: 50px;
-            height: 26px;
+            width: 52px;
+            height: 28px;
         }
-        .toggle input {
+        .switch input {
             opacity: 0;
             width: 0;
             height: 0;
@@ -78,193 +114,221 @@
         .slider {
             position: absolute;
             cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: #ccc;
-            transition: 0.3s;
-            border-radius: 26px;
+            inset: 0;
+            background: #d6d6d6;
+            transition: 0.2s ease;
+            border-radius: 28px;
         }
         .slider:before {
             position: absolute;
             content: "";
             height: 20px;
             width: 20px;
-            left: 3px;
-            bottom: 3px;
-            background-color: white;
-            transition: 0.3s;
+            left: 4px;
+            top: 4px;
+            background: #fff;
             border-radius: 50%;
+            transition: 0.2s ease;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
         }
         input:checked + .slider {
-            background-color: #667eea;
+            background: #111;
         }
         input:checked + .slider:before {
             transform: translateX(24px);
         }
-        .checkbox-label {
-            font-weight: 600;
-            color: #555;
+        .actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
         }
-        button {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+        .primary-btn {
+            padding: 12px 16px;
             border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
+            border-radius: 10px;
+            background: #111;
+            color: #fff;
+            font-size: 14px;
+            font-weight: 700;
             cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: transform 0.1s ease, box-shadow 0.1s ease;
         }
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        .primary-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.12);
         }
-        button:active {
+        .primary-btn:active {
             transform: translateY(0);
+            box-shadow: none;
         }
-        .status {
-            margin-top: 24px;
-            padding: 16px;
-            background: #f8f9fa;
-            border-radius: 8px;
-            font-family: 'Monaco', 'Menlo', monospace;
-            font-size: 13px;
-            color: #555;
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-        .status-title {
-            font-weight: 600;
-            color: #333;
-            margin-bottom: 8px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        }
-        .success {
-            color: #28a745;
+        .ghost {
+            font-size: 12px;
+            color: #666;
         }
         .stats {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 12px;
-            margin-top: 24px;
+            gap: 10px;
+            margin-bottom: 12px;
         }
         .stat-card {
-            background: #f8f9fa;
-            padding: 16px;
-            border-radius: 8px;
-            text-align: center;
+            padding: 12px;
+            border-radius: 10px;
+            border: 1px solid #e6e6e6;
+            background: #fff;
         }
         .stat-value {
-            font-size: 24px;
+            font-size: 20px;
             font-weight: 700;
-            color: #667eea;
+            color: #111;
         }
         .stat-label {
             font-size: 12px;
-            color: #888;
-            margin-top: 4px;
+            color: #666;
+            margin-top: 2px;
+        }
+        .code-block {
+            border-radius: 10px;
+            border: 1px solid #e6e6e6;
+            background: #111;
+            color: #f5f5f5;
+            padding: 14px;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 12px;
+        }
+        .code-title {
+            font-weight: 700;
+            margin-bottom: 6px;
+            color: #e0e0e0;
+        }
+        #statusContent {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .success {
+            color: #c7ff9b;
+            font-weight: 700;
+        }
+        @media (max-width: 900px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 560px) {
+            .shell {
+                padding: 20px;
+            }
+            h1 {
+                font-size: 22px;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🎯 YouTube Focus Filter</h1>
-        <p class="subtitle">Filter YouTube recommendations based on your focus</p>
-        
-        <form id="configForm">
-            <div class="form-group">
-                <label for="focus">Focus Topics</label>
-                <input type="text" id="focus" placeholder="e.g., programming, machine learning, tutorials">
-            </div>
-            
-            <div class="form-group">
-                <label for="model">LLM Model</label>
-                <input type="text" id="model" value="4o-mini">
-            </div>
-            
-            <div class="form-group">
-                <div class="checkbox-group">
-                    <label class="toggle">
-                        <input type="checkbox" id="enabled" checked>
-                        <span class="slider"></span>
+    <div class="shell">
+        <h1>YouTube Focus Filter</h1>
+        <p class="lede">Plain controls for keeping your recommendations aligned. Black, white, and grey only.</p>
+        <div class="grid">
+            <section class="panel primary">
+                <h2>Configuration</h2>
+                <p class="muted">Describe what to keep. Everything else is filtered.</p>
+                <form id="configForm">
+                    <label class="field" for="focus">
+                        <span class="label">Focus topics</span>
+                        <input type="text" id="focus" placeholder="Deep work, systems thinking, tutorials">
+                        <span class="hint">Comma separated.</span>
                     </label>
-                    <span class="checkbox-label">Filter Enabled</span>
+                    <label class="field" for="model">
+                        <span class="label">LLM model</span>
+                        <input type="text" id="model" value="4o-mini">
+                        <span class="hint">Used to classify recommendations.</span>
+                    </label>
+                    <div class="toggle-row">
+                        <div>
+                            <div class="label">Filter enabled</div>
+                            <div class="hint">Toggle without losing settings.</div>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="enabled" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="actions">
+                        <button type="submit" class="primary-btn">Save configuration</button>
+                        <div class="ghost">Syncs immediately after saving.</div>
+                    </div>
+                </form>
+            </section>
+            <section class="panel secondary">
+                <h2>Live view</h2>
+                <p class="muted">How the filter is behaving.</p>
+                <div class="stats" id="stats" style="display: none;">
+                    <div class="stat-card">
+                        <div class="stat-value" id="statFiltered">0</div>
+                        <div class="stat-label">Videos filtered</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statKept">0</div>
+                        <div class="stat-label">Videos kept</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statDropped">0</div>
+                        <div class="stat-label">Videos dropped</div>
+                    </div>
                 </div>
-            </div>
-            
-            <button type="submit">💾 Save Configuration</button>
-        </form>
-        
-        <div class="stats" id="stats" style="display: none;">
-            <div class="stat-card">
-                <div class="stat-value" id="statFiltered">0</div>
-                <div class="stat-label">Videos Filtered</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="statKept">0</div>
-                <div class="stat-label">Videos Kept</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="statDropped">0</div>
-                <div class="stat-label">Videos Dropped</div>
-            </div>
-        </div>
-        
-        <div class="status">
-            <div class="status-title">Current Configuration</div>
-            <div id="statusContent">Loading...</div>
+                <div class="code-block">
+                    <div class="code-title">Current configuration</div>
+                    <pre id="statusContent">Loading...</pre>
+                </div>
+            </section>
         </div>
     </div>
 
     <script>
-        const API_BASE = '';  // Same origin
-        
+        const API_BASE = '';
+
         async function loadConfig() {
             try {
                 const res = await fetch(`${API_BASE}/config`);
                 const data = await res.json();
-                
+
                 document.getElementById('focus').value = data.focus || '';
                 document.getElementById('enabled').checked = data.enabled;
                 document.getElementById('model').value = data.model || '4o-mini';
-                
+
                 document.getElementById('statusContent').textContent = JSON.stringify(data, null, 2);
             } catch (err) {
                 document.getElementById('statusContent').textContent = 'Error loading config: ' + err.message;
             }
         }
-        
+
         async function saveConfig(e) {
             e.preventDefault();
-            
+
             const payload = {
                 focus: document.getElementById('focus').value,
                 enabled: document.getElementById('enabled').checked,
                 model: document.getElementById('model').value,
             };
-            
+
             try {
                 const res = await fetch(`${API_BASE}/config`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
                 });
-                
+
                 const data = await res.json();
-                document.getElementById('statusContent').innerHTML = 
+                document.getElementById('statusContent').innerHTML =
                     '<span class="success">✓ Saved!</span>\n' + JSON.stringify(data, null, 2);
             } catch (err) {
                 document.getElementById('statusContent').textContent = 'Error saving config: ' + err.message;
             }
         }
-        
+
         document.getElementById('configForm').addEventListener('submit', saveConfig);
-        
-        // Load config only on page load
+
         loadConfig();
     </script>
 </body>

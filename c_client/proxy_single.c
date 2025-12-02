@@ -1109,15 +1109,6 @@ static void write_to_client(int idx)
 {
     proxy_client *cli = clients[idx];
 
-    fprintf(stderr, "[write_to_client] should_filter=%d chunked=%d clen=%d complete=%d filtered_sent=%d resp_len=%zu resp_got=%zu\n",
-            cli->should_filter,
-            cli->resp_is_chunked,
-            cli->resp_has_content_length,
-            cli->resp_complete,
-            cli->resp_filtered_sent,
-            cli->resp_len,
-            cli->resp_got);
-
     // If this response needs filtering, wait until it is fully buffered before sending anything.
     if (cli->should_filter &&
         (cli->resp_is_chunked || cli->resp_has_content_length) &&
@@ -1289,65 +1280,72 @@ static void write_to_client(int idx)
     }
 
     if (!cli->header_injected) {
-        char *first_line_end = strstr(cli->resp_buf, "\r\n");
-        if (!first_line_end) {
-            return;
-        }
-
-        size_t first_line_len = first_line_end - cli->resp_buf + 2;
-
-        ssize_t wrote;
-        if (cli->cli_ssl) {
-            wrote = SSL_write(cli->cli_ssl, cli->resp_buf, first_line_len);
-            if (wrote <= 0) {
-                int err = SSL_get_error(cli->cli_ssl, wrote);
-                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                    return;
-                }
-                fprintf(stderr, "SSL_write to client failed\n");
-                ERR_print_errors_fp(stderr);
-                close_client(idx);
-                return;
-            }
+        // Check if this looks like an HTTP response
+        if (!match_http_start(cli->resp_buf, cli->resp_len)) {
+            // Not an HTTP response, just forward as-is without header injection
+            cli->header_injected = true;  // Mark as "done" so we don't keep checking
+            cli->resp_got = 0;  // Start from beginning
         } else {
-            wrote = write(cli->cli_fd, cli->resp_buf, first_line_len);
-            if (wrote < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                    return;
-                }
-                perror("write to client");
-                close_client(idx);
-                return;
+            char *first_line_end = strstr(cli->resp_buf, "\r\n");
+            if (!first_line_end) {
+                return;  // Wait for more data
             }
-        }
 
-        const char *inject = "X-Proxy:CS112\r\n";
-        if (cli->cli_ssl) {
-            wrote = SSL_write(cli->cli_ssl, inject, strlen(inject));
-            if (wrote <= 0) {
-                int err = SSL_get_error(cli->cli_ssl, wrote);
-                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                    return;
-                }
-                fprintf(stderr, "SSL_write inject header failed\n");
-                ERR_print_errors_fp(stderr);
-                close_client(idx);
-                return;
-            }
-        } else {
-            wrote = write(cli->cli_fd, inject, strlen(inject));
-            if (wrote < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                    return;
-                }
-                perror("write inject header");
-                close_client(idx);
-                return;
-            }
-        }
+            size_t first_line_len = first_line_end - cli->resp_buf + 2;
 
-        cli->header_injected = true;
-        cli->resp_got = first_line_len;
+            ssize_t wrote;
+            if (cli->cli_ssl) {
+                wrote = SSL_write(cli->cli_ssl, cli->resp_buf, first_line_len);
+                if (wrote <= 0) {
+                    int err = SSL_get_error(cli->cli_ssl, wrote);
+                    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                        return;
+                    }
+                    fprintf(stderr, "SSL_write to client failed\n");
+                    ERR_print_errors_fp(stderr);
+                    close_client(idx);
+                    return;
+                }
+            } else {
+                wrote = write(cli->cli_fd, cli->resp_buf, first_line_len);
+                if (wrote < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                        return;
+                    }
+                    perror("write to client");
+                    close_client(idx);
+                    return;
+                }
+            }
+
+            const char *inject = "X-Proxy:CS112\r\n";
+            if (cli->cli_ssl) {
+                wrote = SSL_write(cli->cli_ssl, inject, strlen(inject));
+                if (wrote <= 0) {
+                    int err = SSL_get_error(cli->cli_ssl, wrote);
+                    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                        return;
+                    }
+                    fprintf(stderr, "SSL_write inject header failed\n");
+                    ERR_print_errors_fp(stderr);
+                    close_client(idx);
+                    return;
+                }
+            } else {
+                wrote = write(cli->cli_fd, inject, strlen(inject));
+                if (wrote < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                        return;
+                    }
+                    perror("write inject header");
+                    close_client(idx);
+                    return;
+                }
+            }
+
+            cli->header_injected = true;
+            cli->resp_got = first_line_len;
+        }
     }
 
     if (cli->resp_got < cli->resp_len) {
@@ -1363,7 +1361,7 @@ static void write_to_client(int idx)
                 if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
                     return;
                 }
-                fprintf(stderr, "SSL_write to client failed\n");
+                fprintf(stderr, "SSL_write to client failed err=%d\n", err);
                 ERR_print_errors_fp(stderr);
                 close_client(idx);
                 return;
@@ -1386,11 +1384,20 @@ static void write_to_client(int idx)
     }
 
     if (cli->resp_got == cli->resp_len) {
+        // Reset all response state for next request on this connection
         cli->resp_len = 0;
         cli->resp_got = 0;
         cli->should_filter = false;
         cli->request_checked = false;
         cli->request_rewritten = false;
+        cli->header_injected = false;
+        cli->resp_headers_complete = false;
+        cli->resp_is_chunked = false;
+        cli->resp_has_content_length = false;
+        cli->resp_content_length = 0;
+        cli->resp_header_len = 0;
+        cli->resp_complete = false;
+        cli->resp_logged_encoding = false;
     }
 }
 
