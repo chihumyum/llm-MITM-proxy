@@ -5,7 +5,7 @@ WORKDIR /app
 EXPOSE 5000
 EXPOSE 5001
 
-COPY py_server/ ./
+COPY server/ ./
 
 RUN pip install requests python-dotenv flask openai brotli
 

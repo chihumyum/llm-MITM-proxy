@@ -1,9 +1,9 @@
 """
 TCP Filter Server for YouTube Focus Filter
 
-Protocol:
-- Receive: 4-byte length (big-endian) + raw response body (chunked encoded)
-- Send: 4-byte length (big-endian) + filtered response body (chunked encoded)
+Protocol (Length-Prefix):
+- Receive: 4-byte length (big-endian) + raw response body
+- Send: 4-byte length (big-endian) + filtered response body
 
 The server maintains a persistent connection with the C proxy.
 Also provides an HTTP API for configuration on port 5001.
@@ -11,6 +11,7 @@ Also provides an HTTP API for configuration on port 5001.
 
 import copy
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -18,7 +19,9 @@ import socket
 import struct
 import sys
 import threading
+import time
 import zlib
+from dataclasses import dataclass, field
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -26,15 +29,89 @@ from urllib.parse import parse_qs, urlparse
 
 from llm_client import LLMClient
 
-HOST = "0.0.0.0"
-TCP_PORT = 5000
-HTTP_PORT = 5001
+
+# -----------------------
+# Unified Configuration
+# -----------------------
+
+@dataclass
+class ServerConfig:
+    """Centralized configuration with environment variable support."""
+    host: str = field(default_factory=lambda: os.getenv("SERVER_HOST", "0.0.0.0"))
+    tcp_port: int = field(default_factory=lambda: int(os.getenv("TCP_PORT", "5000")))
+    http_port: int = field(default_factory=lambda: int(os.getenv("HTTP_PORT", "5001")))
+    llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "30.0")))
+    cache_size: int = field(default_factory=lambda: int(os.getenv("CACHE_SIZE", "1000")))
+    cache_ttl: int = field(default_factory=lambda: int(os.getenv("CACHE_TTL", "3600")))  # 1 hour
+
+
+SERVER_CONFIG = ServerConfig()
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 # -----------------------
-# Shared configuration
+# Shared configuration & Statistics
 # -----------------------
+
+class FilterStats:
+    """Thread-safe statistics for filtering operations."""
+    
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.requests_total: int = 0
+        self.videos_processed: int = 0
+        self.videos_kept: int = 0
+        self.videos_dropped: int = 0
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
+        self.errors: int = 0
+        self.last_request_time: Optional[float] = None
+        self.avg_latency_ms: float = 0.0
+        self._latency_samples: List[float] = []
+    
+    def record_request(self, kept: int, dropped: int, latency_ms: float) -> None:
+        with self._lock:
+            self.requests_total += 1
+            self.videos_processed += kept + dropped
+            self.videos_kept += kept
+            self.videos_dropped += dropped
+            self.last_request_time = time.time()
+            self._latency_samples.append(latency_ms)
+            # Keep only last 100 samples for average
+            if len(self._latency_samples) > 100:
+                self._latency_samples.pop(0)
+            self.avg_latency_ms = sum(self._latency_samples) / len(self._latency_samples)
+    
+    def record_cache_hit(self) -> None:
+        with self._lock:
+            self.cache_hits += 1
+    
+    def record_cache_miss(self) -> None:
+        with self._lock:
+            self.cache_misses += 1
+    
+    def record_error(self) -> None:
+        with self._lock:
+            self.errors += 1
+    
+    def to_dict(self) -> Dict:
+        with self._lock:
+            return {
+                "requests_total": self.requests_total,
+                "videos_processed": self.videos_processed,
+                "videos_kept": self.videos_kept,
+                "videos_dropped": self.videos_dropped,
+                "cache_hits": self.cache_hits,
+                "cache_misses": self.cache_misses,
+                "cache_hit_rate": round(self.cache_hits / max(1, self.cache_hits + self.cache_misses) * 100, 1),
+                "errors": self.errors,
+                "avg_latency_ms": round(self.avg_latency_ms, 1),
+                "last_request_time": self.last_request_time,
+            }
+
+
+filter_stats = FilterStats()
+
 
 class ConfigState:
     """
@@ -46,7 +123,7 @@ class ConfigState:
         self._lock = threading.Lock()
         self.focus: Optional[str] = os.getenv("FOCUS", "educational content, programming, learning")
         self.enabled: bool = True
-        self.model: str = os.getenv("LLM_MODEL", "4o-mini")
+        self.model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
     def to_dict(self) -> Dict:
         with self._lock:
@@ -121,76 +198,72 @@ def recompress(data: bytes, encoding: Optional[str]) -> bytes:
 
 
 # -----------------------
-# Chunked encoding helpers
+# LLM Response Cache
 # -----------------------
 
-def decode_chunked(data: bytes) -> bytes:
-    """
-    Decode chunked transfer encoding.
-    Returns the decoded body.
-    """
-    result = bytearray()
-    pos = 0
+class LLMCache:
+    """Thread-safe LRU cache for LLM decisions with TTL support."""
     
-    while pos < len(data):
-        # Find the end of chunk size line
-        line_end = data.find(b'\r\n', pos)
-        if line_end == -1:
-            break
-            
-        # Parse chunk size (hex)
-        chunk_size_str = data[pos:line_end].decode('ascii', errors='ignore').split(';')[0].strip()
-        if not chunk_size_str:
-            pos = line_end + 2
-            continue
-            
-        try:
-            chunk_size = int(chunk_size_str, 16)
-        except ValueError:
-            # Not a valid chunk size, might be trailing data
-            break
-            
-        if chunk_size == 0:
-            # Last chunk
-            break
-            
-        # Extract chunk data
-        chunk_start = line_end + 2
-        chunk_end = chunk_start + chunk_size
-        
-        if chunk_end > len(data):
-            # Incomplete chunk, take what we have
-            result.extend(data[chunk_start:])
-            break
-            
-        result.extend(data[chunk_start:chunk_end])
-        
-        # Move past chunk data and trailing CRLF
-        pos = chunk_end + 2
+    def __init__(self, max_size: int = 1000, ttl_seconds: int = 3600) -> None:
+        self._lock = threading.Lock()
+        self._cache: Dict[str, Tuple[int, float]] = {}  # key -> (decision, timestamp)
+        self._max_size = max_size
+        self._ttl = ttl_seconds
     
-    return bytes(result)
+    def _make_key(self, title: str, focus: str) -> str:
+        """Create a cache key from title and focus."""
+        # Normalize and hash for consistent keys
+        normalized = f"{title.lower().strip()}|{focus.lower().strip()}"
+        return hashlib.md5(normalized.encode()).hexdigest()
+    
+    def get(self, title: str, focus: str) -> Optional[int]:
+        """Get cached decision for a title. Returns None if not cached or expired."""
+        key = self._make_key(title, focus)
+        with self._lock:
+            if key in self._cache:
+                decision, timestamp = self._cache[key]
+                if time.time() - timestamp < self._ttl:
+                    filter_stats.record_cache_hit()
+                    return decision
+                else:
+                    # Expired, remove it
+                    del self._cache[key]
+            filter_stats.record_cache_miss()
+            return None
+    
+    def put(self, title: str, focus: str, decision: int) -> None:
+        """Cache a decision for a title."""
+        key = self._make_key(title, focus)
+        with self._lock:
+            # Evict oldest entries if at capacity
+            if len(self._cache) >= self._max_size:
+                # Remove oldest 10%
+                sorted_items = sorted(self._cache.items(), key=lambda x: x[1][1])
+                to_remove = len(self._cache) // 10 or 1
+                for k, _ in sorted_items[:to_remove]:
+                    del self._cache[k]
+            
+            self._cache[key] = (decision, time.time())
+    
+    def clear(self) -> None:
+        """Clear all cached entries."""
+        with self._lock:
+            self._cache.clear()
+    
+    def stats(self) -> Dict:
+        """Get cache statistics."""
+        with self._lock:
+            return {
+                "size": len(self._cache),
+                "max_size": self._max_size,
+                "ttl_seconds": self._ttl,
+            }
 
 
-def encode_chunked(data: bytes) -> bytes:
-    """
-    Encode data using chunked transfer encoding.
-    """
-    if not data:
-        return b"0\r\n\r\n"
-    
-    result = bytearray()
-    chunk_size = 8192  # 8KB chunks
-    
-    for i in range(0, len(data), chunk_size):
-        chunk = data[i:i + chunk_size]
-        result.extend(f"{len(chunk):x}\r\n".encode('ascii'))
-        result.extend(chunk)
-        result.extend(b"\r\n")
-    
-    # Final chunk
-    result.extend(b"0\r\n\r\n")
-    
-    return bytes(result)
+llm_cache = LLMCache(
+    max_size=SERVER_CONFIG.cache_size,
+    ttl_seconds=SERVER_CONFIG.cache_ttl
+)
 
 
 # -----------------------
@@ -603,30 +676,49 @@ def _filter_structure(node, decisions_iter, titles_iter=None) -> Tuple[object, i
 
 def run_llm_filter(videos: List[Tuple[Dict, str]], focus: str, model: str, client: LLMClient) -> Tuple[List[int], List[str]]:
     """
-    Run LLM filter on videos. Returns (decisions, titles).
+    Run LLM filter on videos with caching. Returns (decisions, titles).
     videos is a list of (renderer_dict, renderer_key) tuples.
     """
     titles = [_extract_title(v[0]) for v in videos]
-    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    decisions = []
+    uncached_indices = []
+    uncached_titles = []
+    
+    # Check cache first
+    for i, title in enumerate(titles):
+        cached = llm_cache.get(title, focus)
+        if cached is not None:
+            decisions.append(cached)
+        else:
+            decisions.append(-1)  # Placeholder
+            uncached_indices.append(i)
+            uncached_titles.append(title)
+    
+    # If all cached, return immediately
+    if not uncached_titles:
+        print(f"[LLM] All {len(titles)} videos found in cache", file=sys.stderr)
+        return decisions, titles
+    
+    print(f"[LLM] Cache: {len(titles) - len(uncached_titles)} hits, {len(uncached_titles)} misses", file=sys.stderr)
+    
+    # Query LLM for uncached titles
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(uncached_titles))
     system = (
         "You are a YouTube video filter. The user wants to focus on specific topics. "
         "For each video title, decide if it matches the user's focus area. "
         "Return a JSON array of 0 or 1 for each video: 1 = keep (matches focus), 0 = filter out (does not match). "
         "Return ONLY the JSON array, nothing else."
     )
-    query = f"User's focus topic: {focus}\n\nVideo titles to evaluate:\n{numbered}\n\nReturn a JSON array with {len(titles)} elements, one for each video."
+    query = f"User's focus topic: {focus}\n\nVideo titles to evaluate:\n{numbered}\n\nReturn a JSON array with {len(uncached_titles)} elements, one for each video."
 
-    print(f"[LLM] Sending {len(titles)} videos to filter", file=sys.stderr)
+    print(f"[LLM] Sending {len(uncached_titles)} videos to filter", file=sys.stderr)
     print(f"[LLM] Focus: {focus}", file=sys.stderr)
-    print(f"[LLM] First 20 titles: {titles[:20]}", file=sys.stderr)
 
     res = client.generate(
         model=model,
         system=system,
         query=query,
         temperature=0.0,
-        lastk=0,
-        rag_usage=False,
     )
     
     raw = res.get("result") if isinstance(res, dict) else None
@@ -634,7 +726,16 @@ def run_llm_filter(videos: List[Tuple[Dict, str]], focus: str, model: str, clien
     
     if not raw:
         raw = json.dumps(res)
-    return _parse_keep_flags(raw, expected=len(titles)), titles
+    
+    uncached_decisions = _parse_keep_flags(raw, expected=len(uncached_titles))
+    
+    # Update cache and fill in decisions
+    for i, idx in enumerate(uncached_indices):
+        decision = uncached_decisions[i]
+        decisions[idx] = decision
+        llm_cache.put(titles[idx], focus, decision)
+    
+    return decisions, titles
 
 
 # -----------------------
@@ -727,8 +828,10 @@ def replace_json_in_body(original_body: bytes, original_json: Dict, filtered_jso
 def filter_response(body: bytes, client: Optional[LLMClient]) -> bytes:
     """
     Filter YouTube response body.
-    Returns the filtered body (still chunked encoded).
+    Returns the filtered body (raw bytes, no chunked encoding).
     """
+    start_time = time.time()
+    
     if client is None or not client.available():
         print("LLM client unavailable, passing through", file=sys.stderr)
         return body
@@ -746,17 +849,15 @@ def filter_response(body: bytes, client: Optional[LLMClient]) -> bytes:
         print("Focus not set, passing through", file=sys.stderr)
         return body
     
-    # Decode chunked encoding
-    decoded_body = decode_chunked(body)
-    print(f"Decoded body size: {len(decoded_body)} bytes", file=sys.stderr)
-
     # Decompress if needed so we can parse JSON
-    decoded_body, encoding_used = decompress_if_needed(decoded_body)
+    decompressed_body, encoding_used = decompress_if_needed(body)
     if encoding_used:
         print(f"Detected compressed body ({encoding_used}), decompressing", file=sys.stderr)
     
+    print(f"Body size: {len(decompressed_body)} bytes", file=sys.stderr)
+    
     # Try to extract JSON
-    json_data = extract_json_from_body(decoded_body)
+    json_data = extract_json_from_body(decompressed_body)
     
     if not json_data:
         print("No JSON found in response, passing through", file=sys.stderr)
@@ -778,6 +879,7 @@ def filter_response(body: bytes, client: Optional[LLMClient]) -> bytes:
         print(f"LLM decisions: {decisions}", file=sys.stderr)
     except Exception as e:
         print(f"LLM filter error: {e}, passing through", file=sys.stderr)
+        filter_stats.record_error()
         import traceback
         traceback.print_exc()
         return body
@@ -788,16 +890,19 @@ def filter_response(body: bytes, client: Optional[LLMClient]) -> bytes:
     filtered_json = copy.deepcopy(json_data)
     filtered_json, kept, dropped = _filter_structure(filtered_json, decisions_iter, titles_iter)
     
-    print(f"Filtered: kept={kept}, replaced with placeholder={dropped}", file=sys.stderr)
+    # Record statistics
+    latency_ms = (time.time() - start_time) * 1000
+    filter_stats.record_request(kept, dropped, latency_ms)
+    
+    print(f"Filtered: kept={kept}, replaced with placeholder={dropped}, latency={latency_ms:.1f}ms", file=sys.stderr)
     
     # Replace JSON in body
-    filtered_body = replace_json_in_body(decoded_body, json_data, filtered_json)
+    filtered_body = replace_json_in_body(decompressed_body, json_data, filtered_json)
     
     # Recompress to match original encoding if we decompressed
     filtered_body = recompress(filtered_body, encoding_used)
     
-    # Re-encode as chunked
-    return encode_chunked(filtered_body)
+    return filtered_body
 
 
 # -----------------------
@@ -817,7 +922,7 @@ def recv_exact(conn: socket.socket, n: int) -> bytes:
 
 def recv_message(conn: socket.socket) -> bytes:
     """
-    Receive a message with 4-byte length prefix.
+    Receive a message with 4-byte length prefix (big-endian).
     """
     length_bytes = recv_exact(conn, 4)
     length = struct.unpack('>I', length_bytes)[0]
@@ -827,7 +932,7 @@ def recv_message(conn: socket.socket) -> bytes:
 
 def send_message(conn: socket.socket, data: bytes) -> None:
     """
-    Send a message with 4-byte length prefix.
+    Send a message with 4-byte length prefix (big-endian).
     """
     length = len(data)
     print(f"Sending message of {length} bytes", file=sys.stderr)
@@ -835,35 +940,29 @@ def send_message(conn: socket.socket, data: bytes) -> None:
     conn.sendall(data)
 
 
-def handle_connection_simple(conn: socket.socket, client: LLMClient) -> None:
+def handle_connection(conn: socket.socket, client: LLMClient) -> None:
     """
-    Simple protocol: receive chunked body until 0\r\n\r\n, filter, send back.
-    No length prefix - matches current C implementation.
+    Handle connection using length-prefix protocol.
+    Receive: 4-byte length + raw body
+    Send: 4-byte length + filtered body
     """
-    buffer = bytearray()
-    
-    while True:
-        chunk = conn.recv(16384)
-        if not chunk:
-            break
-        buffer.extend(chunk)
+    try:
+        # Receive message with length prefix
+        body = recv_message(conn)
         
-        # Check for end of chunked encoding
-        if b"0\r\n\r\n" in buffer:
-            break
-    
-    if not buffer:
-        return
-    
-    print(f"Received {len(buffer)} bytes from C proxy", file=sys.stderr)
-    
-    # Filter the response
-    filtered = filter_response(bytes(buffer), client)
-    
-    print(f"Sending {len(filtered)} bytes back to C proxy", file=sys.stderr)
-    
-    # Send back filtered response
-    conn.sendall(filtered)
+        print(f"Received {len(body)} bytes from C proxy", file=sys.stderr)
+        
+        # Filter the response
+        filtered = filter_response(body, client)
+        
+        print(f"Sending {len(filtered)} bytes back to C proxy", file=sys.stderr)
+        
+        # Send back filtered response with length prefix
+        send_message(conn, filtered)
+        
+    except ConnectionError as e:
+        print(f"Connection error: {e}", file=sys.stderr)
+        raise
 
 
 # -----------------------
@@ -904,8 +1003,17 @@ class ConfigHTTPHandler(SimpleHTTPRequestHandler):
         
         if path == '/config':
             self.send_json(config_state.to_dict())
+        elif path == '/stats':
+            self.send_json(filter_stats.to_dict())
+        elif path == '/cache':
+            self.send_json(llm_cache.stats())
         elif path == '/health':
-            self.send_json({'status': 'ok', 'config': config_state.to_dict()})
+            self.send_json({
+                'status': 'ok',
+                'config': config_state.to_dict(),
+                'stats': filter_stats.to_dict(),
+                'cache': llm_cache.stats(),
+            })
         elif path == '/' or path == '/index.html':
             # Serve the HTML file
             try:
@@ -938,17 +1046,24 @@ class ConfigHTTPHandler(SimpleHTTPRequestHandler):
                     enabled=payload.get('enabled'),
                     model=payload.get('model'),
                 )
+                # Clear cache when focus changes
+                if 'focus' in payload:
+                    llm_cache.clear()
+                    print("[Config] Focus changed, cache cleared", file=sys.stderr)
                 self.send_json(config_state.to_dict())
             except json.JSONDecodeError:
                 self.send_json({'error': 'Invalid JSON'}, 400)
+        elif path == '/cache/clear':
+            llm_cache.clear()
+            self.send_json({'status': 'ok', 'message': 'Cache cleared'})
         else:
             self.send_json({'error': 'Not found'}, 404)
 
 
 def run_http_server():
     """Run the HTTP API server in a separate thread."""
-    server = HTTPServer((HOST, HTTP_PORT), ConfigHTTPHandler)
-    print(f"HTTP API server running on http://{HOST}:{HTTP_PORT}", file=sys.stderr)
+    server = HTTPServer((SERVER_CONFIG.host, SERVER_CONFIG.http_port), ConfigHTTPHandler)
+    print(f"HTTP API server running on http://{SERVER_CONFIG.host}:{SERVER_CONFIG.http_port}", file=sys.stderr)
     server.serve_forever()
 
 
@@ -960,17 +1075,17 @@ def main():
     http_thread = threading.Thread(target=run_http_server, daemon=True)
     http_thread.start()
     
-    print(f"Starting TCP Filter Server on {HOST}:{TCP_PORT}", file=sys.stderr)
+    print(f"Starting TCP Filter Server on {SERVER_CONFIG.host}:{SERVER_CONFIG.tcp_port}", file=sys.stderr)
     print(f"Focus: {config_state.focus}", file=sys.stderr)
     print(f"Model: {config_state.model}", file=sys.stderr)
     
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind((HOST, TCP_PORT))
+        server_socket.bind((SERVER_CONFIG.host, SERVER_CONFIG.tcp_port))
         server_socket.listen(1)
         
-        print(f"TCP server listening on {HOST}:{TCP_PORT}", file=sys.stderr)
-        print(f"Web UI available at http://localhost:{HTTP_PORT}", file=sys.stderr)
+        print(f"TCP server listening on {SERVER_CONFIG.host}:{SERVER_CONFIG.tcp_port}", file=sys.stderr)
+        print(f"Web UI available at http://localhost:{SERVER_CONFIG.http_port}", file=sys.stderr)
         
         while True:
             print("Waiting for C proxy connection...", file=sys.stderr)
@@ -982,7 +1097,7 @@ def main():
                 # Keep connection alive for multiple requests
                 try:
                     while True:
-                        handle_connection_simple(conn, client)
+                        handle_connection(conn, client)
                 except ConnectionError as e:
                     print(f"Connection closed: {e}", file=sys.stderr)
                 except Exception as e:

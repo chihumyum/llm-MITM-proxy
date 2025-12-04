@@ -261,12 +261,12 @@
                 </form>
             </section>
             <section class="panel secondary">
-                <h2>Live view</h2>
-                <p class="muted">How the filter is behaving.</p>
-                <div class="stats" id="stats" style="display: none;">
+                <h2>Live Statistics</h2>
+                <p class="muted">Real-time filter performance.</p>
+                <div class="stats" id="stats">
                     <div class="stat-card">
-                        <div class="stat-value" id="statFiltered">0</div>
-                        <div class="stat-label">Videos filtered</div>
+                        <div class="stat-value" id="statRequests">0</div>
+                        <div class="stat-label">Total requests</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-value" id="statKept">0</div>
@@ -274,8 +274,24 @@
                     </div>
                     <div class="stat-card">
                         <div class="stat-value" id="statDropped">0</div>
-                        <div class="stat-label">Videos dropped</div>
+                        <div class="stat-label">Videos filtered</div>
                     </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statCacheHit">0%</div>
+                        <div class="stat-label">Cache hit rate</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statLatency">0ms</div>
+                        <div class="stat-label">Avg latency</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statErrors">0</div>
+                        <div class="stat-label">Errors</div>
+                    </div>
+                </div>
+                <div class="actions" style="margin-bottom: 12px;">
+                    <button type="button" class="primary-btn" id="clearCacheBtn" style="background: #666;">Clear Cache</button>
+                    <div class="ghost" id="cacheSize">Cache: 0 entries</div>
                 </div>
                 <div class="code-block">
                     <div class="code-title">Current configuration</div>
@@ -287,6 +303,7 @@
 
     <script>
         const API_BASE = '';
+        let statsInterval = null;
 
         async function loadConfig() {
             try {
@@ -295,11 +312,32 @@
 
                 document.getElementById('focus').value = data.focus || '';
                 document.getElementById('enabled').checked = data.enabled;
-                document.getElementById('model').value = data.model || '4o-mini';
+                document.getElementById('model').value = data.model || 'gpt-4o-mini';
 
                 document.getElementById('statusContent').textContent = JSON.stringify(data, null, 2);
             } catch (err) {
                 document.getElementById('statusContent').textContent = 'Error loading config: ' + err.message;
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const [statsRes, cacheRes] = await Promise.all([
+                    fetch(`${API_BASE}/stats`),
+                    fetch(`${API_BASE}/cache`)
+                ]);
+                const stats = await statsRes.json();
+                const cache = await cacheRes.json();
+
+                document.getElementById('statRequests').textContent = stats.requests_total;
+                document.getElementById('statKept').textContent = stats.videos_kept;
+                document.getElementById('statDropped').textContent = stats.videos_dropped;
+                document.getElementById('statCacheHit').textContent = stats.cache_hit_rate + '%';
+                document.getElementById('statLatency').textContent = stats.avg_latency_ms + 'ms';
+                document.getElementById('statErrors').textContent = stats.errors;
+                document.getElementById('cacheSize').textContent = `Cache: ${cache.size}/${cache.max_size} entries`;
+            } catch (err) {
+                console.error('Error loading stats:', err);
             }
         }
 
@@ -322,14 +360,35 @@
                 const data = await res.json();
                 document.getElementById('statusContent').innerHTML =
                     '<span class="success">✓ Saved!</span>\n' + JSON.stringify(data, null, 2);
+                
+                // Refresh stats after config change (cache might be cleared)
+                loadStats();
             } catch (err) {
                 document.getElementById('statusContent').textContent = 'Error saving config: ' + err.message;
             }
         }
 
-        document.getElementById('configForm').addEventListener('submit', saveConfig);
+        async function clearCache() {
+            try {
+                const res = await fetch(`${API_BASE}/cache/clear`, { method: 'POST' });
+                const data = await res.json();
+                document.getElementById('statusContent').innerHTML =
+                    '<span class="success">✓ Cache cleared!</span>\n' + JSON.stringify(data, null, 2);
+                loadStats();
+            } catch (err) {
+                document.getElementById('statusContent').textContent = 'Error clearing cache: ' + err.message;
+            }
+        }
 
+        document.getElementById('configForm').addEventListener('submit', saveConfig);
+        document.getElementById('clearCacheBtn').addEventListener('click', clearCache);
+
+        // Initial load
         loadConfig();
+        loadStats();
+
+        // Auto-refresh stats every 3 seconds
+        statsInterval = setInterval(loadStats, 3000);
     </script>
 </body>
 </html>

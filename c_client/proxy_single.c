@@ -13,6 +13,7 @@
 #include <sys/select.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <fcntl.h>
 
 #include <openssl/ssl.h>
@@ -415,7 +416,70 @@ static void close_python_connection(void)
     }
 }
 
-static int filter_chunked_via_python(const char *body, size_t body_len, char **out_body, size_t *out_len)
+// Helper functions for length-prefix protocol
+static int send_exact(int sock, const char *data, size_t len)
+{
+    size_t written = 0;
+    while (written < len) {
+        ssize_t w = write(sock, data + written, len - written);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        written += (size_t)w;
+    }
+    return 0;
+}
+
+static int recv_exact(int sock, char *buf, size_t len)
+{
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = read(sock, buf + got, len - got);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            return -1;
+        }
+        got += (size_t)n;
+    }
+    return 0;
+}
+
+static int send_message(int sock, const char *data, size_t len)
+{
+    // Send 4-byte length prefix (big-endian)
+    uint32_t net_len = htonl((uint32_t)len);
+    if (send_exact(sock, (char *)&net_len, 4) < 0) {
+        return -1;
+    }
+    // Send body
+    return send_exact(sock, data, len);
+}
+
+static char *recv_message(int sock, size_t *out_len)
+{
+    // Receive 4-byte length prefix (big-endian)
+    uint32_t net_len;
+    if (recv_exact(sock, (char *)&net_len, 4) < 0) {
+        return NULL;
+    }
+    size_t len = ntohl(net_len);
+    
+    // Allocate and receive body
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        return NULL;
+    }
+    if (recv_exact(sock, buf, len) < 0) {
+        free(buf);
+        return NULL;
+    }
+    buf[len] = '\0';
+    *out_len = len;
+    return buf;
+}
+
+static int filter_via_python(const char *body, size_t body_len, char **out_body, size_t *out_len)
 {
     int sock = ensure_python_connection();
     if (sock < 0) {
@@ -424,63 +488,28 @@ static int filter_chunked_via_python(const char *body, size_t body_len, char **o
     }
 
     fprintf(stderr, "[filter] sending %zu bytes to python %s:%d\n", body_len, py_host, py_port);
-    size_t written = 0;
-    while (written < body_len) {
-        ssize_t w = write(sock, body + written, body_len - written);
-        if (w < 0) {
-            perror("[filter] write to python");
-            close_python_connection();
-            return -1;
-        }
-        written += (size_t)w;
-    }
-    fprintf(stderr, "[filter] wrote %zu bytes to python\n", written);
-
-    size_t cap = body_len > 0 ? body_len * 2 : 8192;
-    char *buf = malloc(cap);
-    if (!buf) {
-        fprintf(stderr, "[filter] malloc failed while reading python response\n");
+    
+    // Send message with length prefix
+    if (send_message(sock, body, body_len) < 0) {
+        perror("[filter] send_message to python");
+        close_python_connection();
         return -1;
     }
-    size_t len = 0;
-    char tmp[BUFFER_SIZE];
+    fprintf(stderr, "[filter] sent message with %zu bytes body\n", body_len);
 
-    bool saw_terminator = false;
-    while (1) {
-        ssize_t n = read(sock, tmp, sizeof(tmp));
-        if (n <= 0) {
-            if (n < 0) {
-                if (errno == EWOULDBLOCK || errno == EAGAIN) {
-                    fprintf(stderr, "[filter] timeout waiting for python response\n");
-                } else {
-                    perror("[filter] read from python");
-                }
-            }
-            close_python_connection();
-            free(buf);
-            return -1;
+    // Receive response with length prefix
+    *out_body = recv_message(sock, out_len);
+    if (!*out_body) {
+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+            fprintf(stderr, "[filter] timeout waiting for python response\n");
+        } else {
+            perror("[filter] recv_message from python");
         }
-        if (len + (size_t)n > cap) {
-            cap = (cap + (size_t)n) * 2;
-            char *nb = realloc(buf, cap);
-            if (!nb) {
-                free(buf);
-                return -1;
-            }
-            buf = nb;
-        }
-        memcpy(buf + len, tmp, (size_t)n);
-        len += (size_t)n;
-
-        if (len >= 5 && contains_terminator(buf, len, "0\r\n\r\n", 5)) {
-            saw_terminator = true;
-            break;
-        }
+        close_python_connection();
+        return -1;
     }
 
-    *out_body = buf;
-    *out_len = len;
-    fprintf(stderr, "[filter] received %zu bytes from python%s\n", len, saw_terminator ? " (terminator seen)" : "");
+    fprintf(stderr, "[filter] received %zu bytes from python\n", *out_len);
     return 0;
 }
 
@@ -1120,23 +1149,74 @@ static void write_to_client(int idx)
         fprintf(stderr, "[filter] start filtering response len=%zu (header %zu)\n", cli->resp_len, cli->resp_header_len);
         const char *body = cli->resp_buf + cli->resp_header_len;
         size_t body_len = cli->resp_len - cli->resp_header_len;
-        char *chunked_body = NULL;
-        size_t chunked_len = 0;
-
+        
+        // For chunked responses, decode first to get raw body
+        char *raw_body = NULL;
+        size_t raw_body_len = 0;
+        bool need_free_raw = false;
+        
         if (cli->resp_is_chunked) {
-            chunked_body = (char *)body;
-            chunked_len = body_len;
-        } else {
-            chunked_body = encode_chunked(body, body_len, &chunked_len);
-            if (!chunked_body) {
+            // Decode chunked to get raw body for Python
+            // Simple chunked decoding
+            raw_body = malloc(body_len);
+            if (!raw_body) {
+                fprintf(stderr, "[filter] malloc failed for chunked decode\n");
                 return;
             }
+            need_free_raw = true;
+            
+            size_t pos = 0;
+            size_t out_pos = 0;
+            while (pos < body_len) {
+                // Find chunk size line end
+                const char *line_end = NULL;
+                for (size_t i = pos; i + 1 < body_len; i++) {
+                    if (body[i] == '\r' && body[i+1] == '\n') {
+                        line_end = body + i;
+                        break;
+                    }
+                }
+                if (!line_end) break;
+                
+                // Parse chunk size
+                char size_str[32] = {0};
+                size_t size_len = (size_t)(line_end - (body + pos));
+                if (size_len >= sizeof(size_str)) size_len = sizeof(size_str) - 1;
+                memcpy(size_str, body + pos, size_len);
+                size_t chunk_size = strtoul(size_str, NULL, 16);
+                
+                if (chunk_size == 0) break;  // Last chunk
+                
+                pos = (size_t)(line_end - body) + 2;  // Skip CRLF
+                if (pos + chunk_size > body_len) break;
+                
+                memcpy(raw_body + out_pos, body + pos, chunk_size);
+                out_pos += chunk_size;
+                pos += chunk_size + 2;  // Skip chunk data and trailing CRLF
+            }
+            raw_body_len = out_pos;
+        } else {
+            raw_body = (char *)body;
+            raw_body_len = body_len;
         }
 
         char *filtered = NULL;
         size_t filtered_len = 0;
 
-        if (filter_chunked_via_python(chunked_body, chunked_len, &filtered, &filtered_len) == 0) {
+        // Send raw body to Python (length-prefix protocol)
+        if (filter_via_python(raw_body, raw_body_len, &filtered, &filtered_len) == 0) {
+            // Re-encode filtered body as chunked for client
+            char *chunked_filtered = NULL;
+            size_t chunked_filtered_len = 0;
+            chunked_filtered = encode_chunked(filtered, filtered_len, &chunked_filtered_len);
+            
+            if (!chunked_filtered) {
+                fprintf(stderr, "[filter] encode_chunked failed\n");
+                free(filtered);
+                if (need_free_raw) free(raw_body);
+                return;
+            }
+            
             // rebuild header: remove Content-Length, ensure Transfer-Encoding: chunked
             size_t header_out_cap = cli->resp_header_len + 256;
             char *header_out = malloc(header_out_cap);
@@ -1178,7 +1258,7 @@ static void write_to_client(int idx)
                 }
                 memcpy(header_out + header_out_len, te, te_len);
                 header_out_len += te_len;
-                fprintf(stderr, "[filter] sending header (%zu bytes):\n%.*s\n", header_out_len, (int)header_out_len, header_out);
+                fprintf(stderr, "[filter] sending header (%zu bytes)\n", header_out_len);
             }
 
             const char *hdr_ptr = header_out ? header_out : cli->resp_buf;
@@ -1212,10 +1292,10 @@ static void write_to_client(int idx)
             fprintf(stderr, "[filter] header sent: %zu/%zu bytes\n", header_written, hdr_len);
 
             size_t body_written = 0;
-            while (body_written < filtered_len) {
+            while (body_written < chunked_filtered_len) {
                 ssize_t w;
                 if (cli->cli_ssl) {
-                    w = SSL_write(cli->cli_ssl, filtered + body_written, filtered_len - body_written);
+                    w = SSL_write(cli->cli_ssl, chunked_filtered + body_written, chunked_filtered_len - body_written);
                     if (w <= 0) {
                         int err = SSL_get_error(cli->cli_ssl, w);
                         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
@@ -1225,7 +1305,7 @@ static void write_to_client(int idx)
                         break;
                     }
                 } else {
-                    w = write(cli->cli_fd, filtered + body_written, filtered_len - body_written);
+                    w = write(cli->cli_fd, chunked_filtered + body_written, chunked_filtered_len - body_written);
                     if (w < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
                             continue;  // Retry
@@ -1236,11 +1316,12 @@ static void write_to_client(int idx)
                 }
                 body_written += (size_t)w;
             }
-            fprintf(stderr, "[filter] body sent: %zu/%zu bytes\n", body_written, filtered_len);
+            fprintf(stderr, "[filter] body sent: %zu/%zu bytes\n", body_written, chunked_filtered_len);
 
             free(header_out);
+            free(chunked_filtered);
         } else {
-            fprintf(stderr, "filter_chunked_via_python failed, sending original response\n");
+            fprintf(stderr, "filter_via_python failed, sending original response\n");
             cli->should_filter = false; // avoid repeated attempts if python side is down
             // fall back to sending original
             size_t sent = 0;
@@ -1253,9 +1334,7 @@ static void write_to_client(int idx)
             }
         }
 
-        if (!cli->resp_is_chunked && chunked_body && chunked_body != body) {
-            free(chunked_body);
-        }
+        if (need_free_raw) free(raw_body);
         free(filtered);
         // Reset all response state for next request on this connection
         cli->resp_filtered_sent = true;

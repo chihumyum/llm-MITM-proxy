@@ -4,28 +4,28 @@ networks:
     driver: bridge
 
 services:
-  proxy:
+  mitm_proxy:
     build:
       context: .
-      dockerfile: Dockerfile.proxy
-    container_name: proxy
+      dockerfile: Dockerfile.mitm_proxy
+    container_name: mitm_proxy
     ports:
       - "9400:9400"
     networks:
       - net
     environment:
-      - PY_SERVER_HOST=py_server
+      - PY_SERVER_HOST=server
       - PY_SERVER_PORT=5000
     depends_on:
-      - py_server
+      - server
 
-  py_server:
+  server:
     build:
       context: .
-      dockerfile: Dockerfile.py_server
-    container_name: py_server
+      dockerfile: Dockerfile.server
+    container_name: server
     env_file:
-      - ./py_server/.env
+      - ./server/.env
     environment:
       - FOCUS=study networks, nothing else
       - LLM_MODEL=gpt-4o-mini
