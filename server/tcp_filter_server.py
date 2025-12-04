@@ -122,7 +122,7 @@ class ConfigState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.focus: Optional[str] = os.getenv("FOCUS", "educational content, programming, learning")
-        self.enabled: bool = True
+        self.enabled: bool = False
         self.model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
     def to_dict(self) -> Dict:

@@ -228,7 +228,6 @@
 <body>
     <div class="shell">
         <h1>YouTube Focus Filter</h1>
-        <p class="lede">Plain controls for keeping your recommendations aligned. Black, white, and grey only.</p>
         <div class="grid">
             <section class="panel primary">
                 <h2>Configuration</h2>
@@ -237,12 +236,10 @@
                     <label class="field" for="focus">
                         <span class="label">Focus topics</span>
                         <input type="text" id="focus" placeholder="Deep work, systems thinking, tutorials">
-                        <span class="hint">Comma separated.</span>
                     </label>
                     <label class="field" for="model">
                         <span class="label">LLM model</span>
                         <input type="text" id="model" value="4o-mini">
-                        <span class="hint">Used to classify recommendations.</span>
                     </label>
                     <div class="toggle-row">
                         <div>
@@ -256,7 +253,6 @@
                     </div>
                     <div class="actions">
                         <button type="submit" class="primary-btn">Save configuration</button>
-                        <div class="ghost">Syncs immediately after saving.</div>
                     </div>
                 </form>
             </section>
